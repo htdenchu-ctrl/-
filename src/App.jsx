@@ -751,10 +751,8 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
 
   // 各日について最適化
   // 数回繰り返すと連鎖的に改善することがあるので、3回まで反復
-  console.log('[Step 2.7] 休前/休明け最適化を開始します。日数:', dateStrs.length);
   for (let iteration = 0; iteration < 3; iteration++) {
     let madeChange = false;
-    console.log(`[Step 2.7] === iteration ${iteration + 1}/3 ===`);
     for (let i = 0; i < dateStrs.length; i++) {
       const ds = dateStrs[i];
       // この日の出勤者(早/中/遅のみ・ママは除外・手動ロックは除外)を集める
@@ -764,11 +762,6 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
         const v = result[s.id][ds];
         return v === 'EARLY' || v === 'MIDDLE' || v === 'LATE';
       });
-      // デバッグ: 各日の swappable 状態をログ出力
-      if (swappable.length > 0) {
-        const detail = swappable.map(s => `${s.name}=${result[s.id][ds]}`).join(', ');
-        console.log(`[Step 2.7] ${ds} swappable(${swappable.length}人): ${detail}`);
-      }
       if (swappable.length < 1) continue;
 
       // ペアごとに交換を試みる
@@ -790,17 +783,10 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
           const aAfter = getSatisfaction(sa.id, i, sa.type, vb);
           const bBefore = getSatisfaction(sb.id, i, sb.type, vb);
           const bAfter = getSatisfaction(sb.id, i, sb.type, va);
-          // デバッグ: 交換できそうなペアの状態をログ
-          if (currentSat > swappedSat || ds === '2026-05-12' || ds === '2026-05-20' || ds === '2026-05-23' || ds === '2026-05-26') {
-            const saPriority = getFinalShiftPriority(sa.id, i, sa.type);
-            const sbPriority = getFinalShiftPriority(sb.id, i, sb.type);
-            console.log(`  [候補] ${ds} ${sa.name}(${va}, 優先=${saPriority?.join('-')||'通常'}) vs ${sb.name}(${vb}, 優先=${sbPriority?.join('-')||'通常'}) curr=${currentSat} swap=${swappedSat} aB=${aBefore} aA=${aAfter} bB=${bBefore} bA=${bAfter}`);
-          }
-          if (aBefore === 0 && aAfter >= 2) { console.log(`  [拒否] ${ds} aBefore=0でaAfter>=2`); continue; }
-          if (bBefore === 0 && bAfter >= 2) { console.log(`  [拒否] ${ds} bBefore=0でbAfter>=2`); continue; }
+          if (aBefore === 0 && aAfter >= 2) continue;
+          if (bBefore === 0 && bAfter >= 2) continue;
           // 合計が改善するなら交換
           if (swappedSat < currentSat) {
-            console.log(`[Step 2.7] ${ds} 交換: ${sa.name}(${va}→${vb}) ⇔ ${sb.name}(${vb}→${va}) [満足度 ${currentSat}→${swappedSat}]`);
             result[sa.id][ds] = vb;
             result[sb.id][ds] = va;
             madeChange = true;
@@ -855,7 +841,6 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
 
         // 変更後に埋まっている枠の数が増えるか同じなら、店舗バランスを悪化させない
         if (filledAfter >= filledBefore) {
-          console.log(`[Step 2.7] ${ds} 単独変更: ${s.name}(${cur}→${ideal}) [枠数 ${filledBefore}→${filledAfter}]`);
           result[s.id][ds] = ideal;
           madeChange = true;
         }
@@ -2150,6 +2135,68 @@ export default function ShiftTool() {
         ctx.fillStyle = '#a16207';
         ctx.font = `8px ${fontFamily}`;
         ctx.fillText('日', helpSummaryX + summaryW / 2, y + cellH / 2 + 12);
+
+        y += cellH;
+
+        // ============== 人数行 (店舗にいる人数 = 出張除く・半休0.5・ヘルプ別) ==============
+        ctx.fillStyle = '#f5f5f4';
+        ctx.fillRect(tableX, y, tableWidth, cellH);
+        ctx.strokeStyle = '#1c1917';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(tableX, y);
+        ctx.lineTo(tableX + tableWidth, y);
+        ctx.stroke();
+
+        // ラベル
+        ctx.fillStyle = '#44403c';
+        ctx.font = `600 12px ${fontFamily}`;
+        ctx.textAlign = 'left';
+        ctx.fillText('人数', tableX + 8, y + cellH / 2 - 4);
+        ctx.fillStyle = '#78716c';
+        ctx.font = `9px ${fontFamily}`;
+        ctx.fillText('出張除·半休0.5', tableX + 8, y + cellH / 2 + 10);
+
+        // 区切り線
+        ctx.strokeStyle = '#1c1917';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(tableX + labelColW, y);
+        ctx.lineTo(tableX + labelColW, y + cellH);
+        ctx.stroke();
+
+        // 各日の人数を計算して表示
+        days.forEach((d, idx) => {
+          const ds = dateStrs[idx];
+          const cx = tableX + labelColW + cellW * idx;
+          let total = 0;
+          staff.forEach(s => {
+            const v = generatedShifts[s.id]?.[ds];
+            if (!v) return;
+            if (v === 'OFF' || v === 'REQUEST_OFF' || v === 'TRIP') return; // 休・出張は除外
+            if (v === 'HALF_OFF') total += 0.5;
+            else total += 1; // 早/中/遅/早M(MAMA)/MT
+          });
+          // ヘルプ枠も店舗にいるのでカウント(他店舗応援だが店舗で勤務)
+          if (helpAssignments?.[ds]) total += 1;
+          // 数値表示 (整数なら整数、小数なら .5 表示)
+          const display = total === Math.floor(total) ? `${total}` : `${total.toFixed(1)}`;
+          ctx.fillStyle = '#1c1917';
+          ctx.font = `700 14px ${fontFamily}`;
+          ctx.textAlign = 'center';
+          ctx.fillText(display, cx + cellW / 2, y + cellH / 2 + 4);
+        });
+
+        // 人数行の右端の合計セル(空白)
+        const peopleSummaryX = tableX + labelColW + cellW * days.length;
+        ctx.fillStyle = '#f5f5f4';
+        ctx.fillRect(peopleSummaryX, y, summaryW, cellH);
+        ctx.strokeStyle = '#1c1917';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(peopleSummaryX, y);
+        ctx.lineTo(peopleSummaryX, y + cellH);
+        ctx.stroke();
 
         y += cellH;
 
@@ -3735,6 +3782,7 @@ function RequestsView({ staff, days, dateStrs, fixedShifts, toggleFixedShift, se
           <div className="mt-6 flex gap-6 text-xs font-sans-jp">
             <span className="flex items-center gap-2"><span className="w-3 h-3 bg-stone-700"/>希望休</span>
             <span className="flex items-center gap-2"><span className="w-3 h-3 bg-violet-700"/>MT必出</span>
+            <span className="flex items-center gap-2"><span className="w-3 h-3 bg-indigo-700"/>出張</span>
           </div>
         </div>
       )}
