@@ -748,8 +748,10 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
 
   // 各日について最適化
   // 数回繰り返すと連鎖的に改善することがあるので、3回まで反復
+  console.log('[Step 2.7] 休前/休明け最適化を開始します。日数:', dateStrs.length);
   for (let iteration = 0; iteration < 3; iteration++) {
     let madeChange = false;
+    console.log(`[Step 2.7] === iteration ${iteration + 1}/3 ===`);
     for (let i = 0; i < dateStrs.length; i++) {
       const ds = dateStrs[i];
       // この日の出勤者(早/中/遅のみ・ママは除外・手動ロックは除外)を集める
@@ -759,6 +761,11 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
         const v = result[s.id][ds];
         return v === 'EARLY' || v === 'MIDDLE' || v === 'LATE';
       });
+      // デバッグ: 各日の swappable 状態をログ出力
+      if (swappable.length > 0) {
+        const detail = swappable.map(s => `${s.name}=${result[s.id][ds]}`).join(', ');
+        console.log(`[Step 2.7] ${ds} swappable(${swappable.length}人): ${detail}`);
+      }
       if (swappable.length < 1) continue;
 
       // ペアごとに交換を試みる
@@ -785,6 +792,7 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
           if (bBefore === 0 && bAfter >= 2) continue;
           // 合計が改善するなら交換
           if (swappedSat < currentSat) {
+            console.log(`[Step 2.7] ${ds} 交換: ${sa.name}(${va}→${vb}) ⇔ ${sb.name}(${vb}→${va}) [満足度 ${currentSat}→${swappedSat}]`);
             result[sa.id][ds] = vb;
             result[sb.id][ds] = va;
             madeChange = true;
@@ -839,6 +847,7 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
 
         // 変更後に埋まっている枠の数が増えるか同じなら、店舗バランスを悪化させない
         if (filledAfter >= filledBefore) {
+          console.log(`[Step 2.7] ${ds} 単独変更: ${s.name}(${cur}→${ideal}) [枠数 ${filledBefore}→${filledAfter}]`);
           result[s.id][ds] = ideal;
           madeChange = true;
         }
