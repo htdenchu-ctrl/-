@@ -781,15 +781,20 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
           const currentSat = getSatisfaction(sa.id, i, sa.type, va) + getSatisfaction(sb.id, i, sb.type, vb);
           // 交換後の満足度
           const swappedSat = getSatisfaction(sa.id, i, sa.type, vb) + getSatisfaction(sb.id, i, sb.type, va);
-          // 交換でいずれかの満足度が悪化(順位が上がる)するなら、合計が改善しても見送る場合あり
           // 個別悪化チェック: 第1優先(0)だった人を「第3優先(2)」まで急落させる交換は避ける
           // (第2優先までの悪化は、合計改善があれば許容)
           const aBefore = getSatisfaction(sa.id, i, sa.type, va);
           const aAfter = getSatisfaction(sa.id, i, sa.type, vb);
           const bBefore = getSatisfaction(sb.id, i, sb.type, vb);
           const bAfter = getSatisfaction(sb.id, i, sb.type, va);
-          if (aBefore === 0 && aAfter >= 2) continue;
-          if (bBefore === 0 && bAfter >= 2) continue;
+          // デバッグ: 交換できそうなペアの状態をログ
+          if (currentSat > swappedSat || ds === '2026-05-12' || ds === '2026-05-20' || ds === '2026-05-23' || ds === '2026-05-26') {
+            const saPriority = getFinalShiftPriority(sa.id, i, sa.type);
+            const sbPriority = getFinalShiftPriority(sb.id, i, sb.type);
+            console.log(`  [候補] ${ds} ${sa.name}(${va}, 優先=${saPriority?.join('-')||'通常'}) vs ${sb.name}(${vb}, 優先=${sbPriority?.join('-')||'通常'}) curr=${currentSat} swap=${swappedSat} aB=${aBefore} aA=${aAfter} bB=${bBefore} bA=${bAfter}`);
+          }
+          if (aBefore === 0 && aAfter >= 2) { console.log(`  [拒否] ${ds} aBefore=0でaAfter>=2`); continue; }
+          if (bBefore === 0 && bAfter >= 2) { console.log(`  [拒否] ${ds} bBefore=0でbAfter>=2`); continue; }
           // 合計が改善するなら交換
           if (swappedSat < currentSat) {
             console.log(`[Step 2.7] ${ds} 交換: ${sa.name}(${va}→${vb}) ⇔ ${sb.name}(${vb}→${va}) [満足度 ${currentSat}→${swappedSat}]`);
