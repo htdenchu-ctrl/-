@@ -497,9 +497,9 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
     });
 
     // 必要なシフトタイプを決定（早・中・遅をバランス良く）
-    // MTは時間帯不問なのでバランス計算から除外、出張は店舗に出ないので除外
+    // MTは時間帯10:30-19:30(中番相当)としてバランス計算に含める、出張は店舗に出ないので除外
     const hasEarly = assignedShifts.some(v => v === 'EARLY' || v === 'MAMA');
-    const hasMiddle = assignedShifts.some(v => v === 'MIDDLE');
+    const hasMiddle = assignedShifts.some(v => v === 'MIDDLE' || isMTShift(v));
     const hasLate = assignedShifts.some(v => v === 'LATE');
 
     const shiftPriority = [];
@@ -511,52 +511,7 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
     }
 
     let assigned = 0;
-
-    // ============== Phase 1: 個人の第1優先シフトを先に確保 ==============
-    // 休前/休明けで「この時間帯に出たい」が明確な人を、まずその枠で確定させる
-    // (これをやらないと、店舗バランス用ループが順次埋めるうちに、本人の第1優先と異なる枠で消費される)
-    // ※ 同じ枠を希望する人が複数いる場合は、最初に見つかった人を優先(後の人は通常ループで処理)
-    const phase1Assigned = new Set(); // この日に Phase 1 で割当済みのスタッフID
-    const usedInPhase1 = { EARLY: false, MIDDLE: false, LATE: false };
-    for (const c of [...candidates]) {
-      if (assigned >= needsToAssign) break;
-      if (c.type === STAFF_TYPE.MAMA) continue; // ママさんは別ロジック
-      const priority = getShiftPriority(c.id, i, c.type);
-      if (!priority) continue; // 通常日はPhase 2へ
-      const top = priority[0]; // 第1優先 (EARLY/MIDDLE/LATE のいずれか)
-      // 既にその枠が他のスタッフ(Phase 1 or 既存固定)で使われていたらスキップ
-      if (usedInPhase1[top]) continue;
-      // 店舗が既にその枠を持っているか確認 (assignedShiftsで確認)
-      const alreadyHasInStore = (
-        (top === 'EARLY' && (hasEarly || usedInPhase1.EARLY)) ||
-        (top === 'MIDDLE' && (hasMiddle || usedInPhase1.MIDDLE)) ||
-        (top === 'LATE' && (hasLate || usedInPhase1.LATE))
-      );
-      if (alreadyHasInStore) continue;
-      // この人をその枠で確定
-      result[c.id][ds] = top;
-      phase1Assigned.add(c.id);
-      usedInPhase1[top] = true;
-      const cIdx = candidates.findIndex(cc => cc.id === c.id);
-      if (cIdx >= 0) candidates.splice(cIdx, 1);
-      assigned++;
-    }
-
-    // Phase 1 で店舗バランスが変わった可能性があるので、再評価
-    const phase1HasEarly = hasEarly || usedInPhase1.EARLY;
-    const phase1HasMiddle = hasMiddle || usedInPhase1.MIDDLE;
-    const phase1HasLate = hasLate || usedInPhase1.LATE;
-    // 残りの shiftPriority を再構築 (Phase 1 で埋まった枠は除外)
-    const remainingShiftPriority = [];
-    if (!phase1HasEarly) remainingShiftPriority.push('EARLY');
-    if (!phase1HasLate) remainingShiftPriority.push('LATE');
-    if (!phase1HasMiddle) remainingShiftPriority.push('MIDDLE');
-    while (remainingShiftPriority.length < needsToAssign - assigned) {
-      remainingShiftPriority.push(['EARLY','MIDDLE','LATE'][remainingShiftPriority.length % 3]);
-    }
-
-    // ============== Phase 2: 残り枠を通常ロジックで埋める ==============
-    for (const shiftType of remainingShiftPriority) {
+    for (const shiftType of shiftPriority) {
       if (assigned >= needsToAssign) break;
       // 動的に現在のママさん割当数をチェック（このループ内で割り当てた分も含む）
       const liveMamaCount = staff.filter(st =>
@@ -564,8 +519,8 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
       ).length;
 
       // この shiftType を割り当てられるスタッフを探す
-      // 休前/休明け優先順位が shiftType と合致するスタッフを優先(候補が複数ある場合)
-      const matchableCandidates = candidates.filter(c => {
+      // (休前/休明け優先順位はここでは使わず、Step 2.7で最適化する)
+      const idx = candidates.findIndex(c => {
         // 3人シフト日でママさんが既に1人いるなら他のママさんは除外
         if (isMamaLimited && c.type === STAFF_TYPE.MAMA && liveMamaCount >= 1) {
           return false;
@@ -575,31 +530,6 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
         }
         return true;
       });
-      // 優先順位スコア(低いほど優先)
-      // - 優先順位ありで第1優先 → -2 (積極的にこの枠で使う)
-      // - 優先順位ありで第2優先 →  0 (中立)
-      // - 優先順位ありで第3優先 → +1 (避けたい)
-      // - 優先順位なし(通常日)   →  0 (中立・どのシフトでもOK)
-      // ※ 通常日の人と優先順位の第2優先は同じ「中立」とすることで、店舗バランスを最優先にしつつ
-      //    本当に「休前は早が望ましい」というケースで -2 で優先される
-      let idx = -1;
-      if (matchableCandidates.length > 0) {
-        const scoredList = matchableCandidates.map(c => {
-          const priority = getShiftPriority(c.id, i, c.type);
-          let score = 0; // 通常日のデフォルト
-          if (priority) {
-            const pos = priority.indexOf(shiftType);
-            if (pos === 0) score = -2;
-            else if (pos === 1) score = 0;
-            else if (pos === 2) score = 1;
-          }
-          return { staff: c, score };
-        });
-        // スコアが最も低いスタッフを選択(同点なら candidates の元の順序維持)
-        scoredList.sort((a, b) => a.score - b.score);
-        const best = scoredList[0]?.staff;
-        if (best) idx = candidates.findIndex(c => c.id === best.id);
-      }
       if (idx >= 0) {
         const s = candidates[idx];
         const actualShift = (s.type === STAFF_TYPE.MAMA && shiftType === 'EARLY') ? 'MAMA' : shiftType;
@@ -629,27 +559,20 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
         if (liveMamaCount >= 1) continue;
       }
 
-      // 早・中・遅の中でその時点で人数の少ないシフトタイプを選ぶ(MTは時間帯不問なので除外)
+      // 早・中・遅の中でその時点で人数の少ないシフトタイプを選ぶ(MTは中番相当としてカウント)
       const counts = { EARLY: 0, MIDDLE: 0, LATE: 0 };
       staff.forEach(st => {
         const v = result[st.id][ds];
         if (v === 'EARLY' || v === 'MAMA') counts.EARLY++;
-        else if (v === 'MIDDLE') counts.MIDDLE++;
+        else if (v === 'MIDDLE' || isMTShift(v)) counts.MIDDLE++;
         else if (v === 'LATE') counts.LATE++;
       });
       let bestType = 'EARLY';
       if (s.type === STAFF_TYPE.MAMA) {
         bestType = 'EARLY';
       } else {
-        // 休前/休明けの優先順位を考慮 (該当しなければ既存ロジック)
-        const priority = getShiftPriority(s.id, i, s.type);
-        if (priority) {
-          // 優先順位の最初を採用 (バランスは無視して連勤前後の負担を優先)
-          bestType = priority[0];
-        } else {
-          // 通常日: 最も少ないシフトタイプを選ぶ
-          bestType = Object.entries(counts).sort((a, b) => a[1] - b[1])[0][0];
-        }
+        // 最も少ないシフトタイプを選ぶ (休前/休明け優先順位は Step 2.7 で最適化)
+        bestType = Object.entries(counts).sort((a, b) => a[1] - b[1])[0][0];
       }
       const actualShift = (s.type === STAFF_TYPE.MAMA && bestType === 'EARLY') ? 'MAMA' : bestType;
       result[s.id][ds] = actualShift;
@@ -757,25 +680,20 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
       // 3人シフト日のママ2人目制約
       if (isMamaLimited && s.type === STAFF_TYPE.MAMA && liveMamaCount() >= 1) continue;
 
-      // 現在の早/中/遅バランスを見て、最も少ないシフトタイプを選ぶ(MTは時間帯不問なので除外)
+      // 現在の早/中/遅バランスを見て、最も少ないシフトタイプを選ぶ(MTは中番相当としてカウント)
       const counts = { EARLY: 0, MIDDLE: 0, LATE: 0 };
       staff.forEach(st => {
         const v = result[st.id][ds];
         if (v === 'EARLY' || v === 'MAMA') counts.EARLY++;
-        else if (v === 'MIDDLE') counts.MIDDLE++;
+        else if (v === 'MIDDLE' || isMTShift(v)) counts.MIDDLE++;
         else if (v === 'LATE') counts.LATE++;
       });
       let shiftType;
       if (s.type === STAFF_TYPE.MAMA) {
         shiftType = 'MAMA'; // ママさんは早Mのみ
       } else {
-        // 休前/休明けの優先順位を考慮
-        const priority = getShiftPriority(s.id, i, s.type);
-        if (priority) {
-          shiftType = priority[0];
-        } else {
-          shiftType = Object.entries(counts).sort((a, b) => a[1] - b[1])[0][0];
-        }
+        // 最も少ないシフトタイプを選ぶ (休前/休明け優先順位は Step 2.7 で最適化)
+        shiftType = Object.entries(counts).sort((a, b) => a[1] - b[1])[0][0];
       }
       result[s.id][ds] = shiftType;
       stillShort--;
@@ -789,8 +707,148 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
     }
   }
 
-  // ↓ヘルプ応援割当へ続く
-  // Step 2.8: 他店舗からのヘルプ応援を割り当てる
+  // ============== Step 2.7: 休前/休明け最適化 (2パス目) ==============
+  // パス1で店舗バランス重視で組まれた編成を、各スタッフの休前/休明けに合わせて最適化する。
+  // パス1完了時点で全日付の休が確定しているため、未来日の休も正確に判定できる。
+  //
+  // ロジック:
+  //   各スタッフ・各日について理想シフト(第1優先)を計算 → 現状と異なる場合、同じ日の他スタッフと
+  //   シフト交換できないか試す。交換相手は「自分の理想シフトを今持っていて、自分の現シフトが交換相手の
+  //   理想にも合致する(またはニュートラル)スタッフ」を探す。両者にとって悪化しない場合のみ交換。
+  // 制約:
+  //   - 手動ロック(manualLocks)されたセルは交換しない
+  //   - MT/出張/休/希望休/半休 のセルは交換対象外(早/中/遅 同士のみ交換)
+  //   - ママさんは早Mのみなので交換対象外
+  //   - 必要人数を超えて出勤している人(forcedWorkersで追加された人)も交換可
+
+  // パス2用の isOffDay (今度は全日付確定済みなので result のみで判定)
+  const isOffDayFinal = (staffId, idx) => {
+    if (idx < 0 || idx >= dateStrs.length) return false;
+    const v = result[staffId][dateStrs[idx]];
+    return v === 'OFF' || v === 'REQUEST_OFF';
+  };
+  // 全期間の優先順位を再評価
+  const getFinalShiftPriority = (staffId, dateIdx, staffType) => {
+    if (staffType === STAFF_TYPE.MAMA) return null;
+    const isAfterOff = isOffDayFinal(staffId, dateIdx - 1);
+    const isBeforeOff = isOffDayFinal(staffId, dateIdx + 1);
+    if (isAfterOff && isBeforeOff) return ['MIDDLE', 'EARLY', 'LATE'];
+    if (isAfterOff) return ['LATE', 'MIDDLE', 'EARLY'];
+    if (isBeforeOff) return ['EARLY', 'MIDDLE', 'LATE'];
+    return null;
+  };
+  // シフトの満足度: 自分の理想優先順位の中で何位か (低いほど満足)
+  // priority がない場合は 1.5 (中立 = 第2優先と第3優先の間)
+  const getSatisfaction = (staffId, dateIdx, staffType, shift) => {
+    const priority = getFinalShiftPriority(staffId, dateIdx, staffType);
+    if (!priority) return 1.5;
+    const pos = priority.indexOf(shift);
+    return pos >= 0 ? pos : 99;
+  };
+
+  // 各日について最適化
+  // 数回繰り返すと連鎖的に改善することがあるので、3回まで反復
+  for (let iteration = 0; iteration < 3; iteration++) {
+    let madeChange = false;
+    for (let i = 0; i < dateStrs.length; i++) {
+      const ds = dateStrs[i];
+      // この日の出勤者(早/中/遅のみ・ママは除外・手動ロックは除外)を集める
+      const swappable = staff.filter(s => {
+        if (s.type === STAFF_TYPE.MAMA) return false;
+        if (manualLocks?.[s.id]?.[ds]) return false;
+        const v = result[s.id][ds];
+        return v === 'EARLY' || v === 'MIDDLE' || v === 'LATE';
+      });
+      if (swappable.length < 1) continue;
+
+      // ペアごとに交換を試みる
+      for (let a = 0; a < swappable.length; a++) {
+        for (let b = a + 1; b < swappable.length; b++) {
+          const sa = swappable[a];
+          const sb = swappable[b];
+          const va = result[sa.id][ds];
+          const vb = result[sb.id][ds];
+          if (va === vb) continue; // 同じシフトなら交換無意味
+
+          // 現在の満足度
+          const currentSat = getSatisfaction(sa.id, i, sa.type, va) + getSatisfaction(sb.id, i, sb.type, vb);
+          // 交換後の満足度
+          const swappedSat = getSatisfaction(sa.id, i, sa.type, vb) + getSatisfaction(sb.id, i, sb.type, va);
+          // 交換でいずれかの満足度が悪化(順位が上がる)するなら、合計が改善しても見送る場合あり
+          // ここでは合計が改善するなら交換(ただし極端な悪化は避ける)
+          // 個別チェック: 交換後どちらかが第3優先(pos=2)以上に悪化するなら見送り
+          const aBefore = getSatisfaction(sa.id, i, sa.type, va);
+          const aAfter = getSatisfaction(sa.id, i, sa.type, vb);
+          const bBefore = getSatisfaction(sb.id, i, sb.type, vb);
+          const bAfter = getSatisfaction(sb.id, i, sb.type, va);
+          // 個別悪化チェック: 元々第1優先(0)だった人を悪化させない
+          if (aBefore === 0 && aAfter > 0) continue;
+          if (bBefore === 0 && bAfter > 0) continue;
+          // 合計が改善するなら交換
+          if (swappedSat < currentSat) {
+            result[sa.id][ds] = vb;
+            result[sb.id][ds] = va;
+            madeChange = true;
+          }
+        }
+      }
+
+      // 単独シフト変更: 「自分の理想シフトが店舗に欠けている枠」なら単独で変更
+      // 例: その日の出勤が「遅・MT・休」だけで早枠が空き、田中が遅で休前(早が理想)なら田中=早に変更
+      // ※ 店舗バランスを考慮: 変更後にその枠(早/中/遅)が複数になる過剰偏りは避ける
+      for (const s of swappable) {
+        const cur = result[s.id][ds];
+        const priority = getFinalShiftPriority(s.id, i, s.type);
+        if (!priority) continue; // 通常日は対象外
+        const ideal = priority[0];
+        if (cur === ideal) continue; // 既に理想
+
+        // 現在の店舗のシフト分布(早/中/遅をカウント・MTは中番相当)
+        const counts = { EARLY: 0, MIDDLE: 0, LATE: 0 };
+        staff.forEach(st => {
+          const v = result[st.id][ds];
+          if (v === 'EARLY' || v === 'MAMA') counts.EARLY++;
+          else if (v === 'MIDDLE' || isMTShift(v)) counts.MIDDLE++;
+          else if (v === 'LATE') counts.LATE++;
+        });
+
+        // 変更後のカウントをシミュレーション
+        const newCounts = { ...counts };
+        if (cur === 'EARLY') newCounts.EARLY--;
+        else if (cur === 'MIDDLE') newCounts.MIDDLE--;
+        else if (cur === 'LATE') newCounts.LATE--;
+        if (ideal === 'EARLY') newCounts.EARLY++;
+        else if (ideal === 'MIDDLE') newCounts.MIDDLE++;
+        else if (ideal === 'LATE') newCounts.LATE++;
+
+        // 変更可能の条件:
+        // 1. 自分の理想シフト(ideal)枠が空き(0名) → 埋める意味がある
+        // 2a. 元の枠(cur)に他のスタッフがいる → 自分が抜けても店舗バランス維持
+        //    OR
+        // 2b. 元の枠(cur)に他がいなくても、自分が抜けて0になる枠の数が変更前と同じ以下
+        //    (つまり店舗バランスを悪化させない)
+        const idealWasEmpty = (
+          (ideal === 'EARLY' && counts.EARLY === 0) ||
+          (ideal === 'MIDDLE' && counts.MIDDLE === 0) ||
+          (ideal === 'LATE' && counts.LATE === 0)
+        );
+        if (!idealWasEmpty) continue; // ideal枠が既に埋まっているなら単独変更しない
+
+        // 変更前後の「埋まっている枠の数」をカウント
+        const filledBefore = [counts.EARLY, counts.MIDDLE, counts.LATE].filter(n => n > 0).length;
+        const filledAfter = [newCounts.EARLY, newCounts.MIDDLE, newCounts.LATE].filter(n => n > 0).length;
+
+        // 変更後に埋まっている枠の数が増えるか同じなら、店舗バランスを悪化させない
+        if (filledAfter >= filledBefore) {
+          result[s.id][ds] = ideal;
+          madeChange = true;
+        }
+      }
+    }
+    if (!madeChange) break;
+  }
+
+
   // ヘルプ要請が必要な日 (helpNeeded) について、他店舗からの応援を1日1名まで配置する
   // 他店舗応援なので連続日でも可。既存スタッフのルールには一切影響しない
   // ルール: ヘルプは中番(HELP_MIDDLE)のみ
