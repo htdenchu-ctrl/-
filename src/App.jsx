@@ -722,9 +722,12 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
   //   - 必要人数を超えて出勤している人(forcedWorkersで追加された人)も交換可
 
   // パス2用の isOffDay (今度は全日付確定済みなので result のみで判定)
+  // 注意: Step 3 (残りを休にする処理)は Step 2.7 より後に走るため、
+  // この時点で未割当(undefined)のセルは「最終的にOFFになる予定」 → 休として判定する
   const isOffDayFinal = (staffId, idx) => {
     if (idx < 0 || idx >= dateStrs.length) return false;
     const v = result[staffId][dateStrs[idx]];
+    if (!v) return true; // undefined = まだ未割当 → 最終的にOFFになるので休扱い
     return v === 'OFF' || v === 'REQUEST_OFF';
   };
   // 全期間の優先順位を再評価
