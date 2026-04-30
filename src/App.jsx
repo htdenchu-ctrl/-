@@ -775,15 +775,14 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
           // 交換後の満足度
           const swappedSat = getSatisfaction(sa.id, i, sa.type, vb) + getSatisfaction(sb.id, i, sb.type, va);
           // 交換でいずれかの満足度が悪化(順位が上がる)するなら、合計が改善しても見送る場合あり
-          // ここでは合計が改善するなら交換(ただし極端な悪化は避ける)
-          // 個別チェック: 交換後どちらかが第3優先(pos=2)以上に悪化するなら見送り
+          // 個別悪化チェック: 第1優先(0)だった人を「第3優先(2)」まで急落させる交換は避ける
+          // (第2優先までの悪化は、合計改善があれば許容)
           const aBefore = getSatisfaction(sa.id, i, sa.type, va);
           const aAfter = getSatisfaction(sa.id, i, sa.type, vb);
           const bBefore = getSatisfaction(sb.id, i, sb.type, vb);
           const bAfter = getSatisfaction(sb.id, i, sb.type, va);
-          // 個別悪化チェック: 元々第1優先(0)だった人を悪化させない
-          if (aBefore === 0 && aAfter > 0) continue;
-          if (bBefore === 0 && bAfter > 0) continue;
+          if (aBefore === 0 && aAfter >= 2) continue;
+          if (bBefore === 0 && bAfter >= 2) continue;
           // 合計が改善するなら交換
           if (swappedSat < currentSat) {
             result[sa.id][ds] = vb;
