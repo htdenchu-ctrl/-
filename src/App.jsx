@@ -523,18 +523,23 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
         }
         return true;
       });
-      // 優先順位: その shiftType がスタッフの第1優先 > 第2優先 > その他
+      // 優先順位スコア(低いほど優先)
+      // - 優先順位ありで第1優先 → -2 (積極的にこの枠で使う)
+      // - 優先順位ありで第2優先 →  0 (中立)
+      // - 優先順位ありで第3優先 → +1 (避けたい)
+      // - 優先順位なし(通常日)   →  0 (中立・どのシフトでもOK)
+      // ※ 通常日の人と優先順位の第2優先は同じ「中立」とすることで、店舗バランスを最優先にしつつ
+      //    本当に「休前は早が望ましい」というケースで -2 で優先される
       let idx = -1;
       if (matchableCandidates.length > 0) {
-        // スタッフごとの優先度スコア計算 (低いほど優先)
         const scoredList = matchableCandidates.map(c => {
           const priority = getShiftPriority(c.id, i, c.type);
-          let score = 99;
+          let score = 0; // 通常日のデフォルト
           if (priority) {
             const pos = priority.indexOf(shiftType);
-            score = pos >= 0 ? pos : 99; // 優先順位リストの位置(0が最優先)
-          } else {
-            score = 1; // 通常日(優先順位なし)は中間スコア
+            if (pos === 0) score = -2;
+            else if (pos === 1) score = 0;
+            else if (pos === 2) score = 1;
           }
           return { staff: c, score };
         });
