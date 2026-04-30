@@ -320,10 +320,17 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
   // - 両方該当(休→出→休): 中(両端を避ける)
   // - どちらでもない: null (既存のバランス計算に任せる)
   // 半休(HALF_OFF)は出勤扱いなので休日には含めない
+  // 注意: 未来日は result がまだ未確定なので、fixedShifts(希望休)も併用して判定
   const isOffDay = (staffId, idx) => {
     if (idx < 0 || idx >= dateStrs.length) return false;
-    const v = result[staffId][dateStrs[idx]];
-    return v === 'OFF' || v === 'REQUEST_OFF';
+    const ds = dateStrs[idx];
+    const v = result[staffId][ds];
+    // 既に処理済みで休 or 希望休
+    if (v === 'OFF' || v === 'REQUEST_OFF') return true;
+    // 未処理(undefined)でも、fixedShiftsで希望休が確定している場合は休扱い
+    const fx = fixedShifts[staffId]?.[ds];
+    if (fx === 'REQUEST_OFF') return true;
+    return false;
   };
   // 「休→出→休」の中日や「休→出」「出→休」を判定し、優先順位を返す
   // 戻り値: ['LATE','MIDDLE','EARLY'] のような優先度配列、または null(既存ロジック)
@@ -504,7 +511,52 @@ const generateShifts = (staff, days, requiredByDate, fixedShifts, exemptions = {
     }
 
     let assigned = 0;
-    for (const shiftType of shiftPriority) {
+
+    // ============== Phase 1: 個人の第1優先シフトを先に確保 ==============
+    // 休前/休明けで「この時間帯に出たい」が明確な人を、まずその枠で確定させる
+    // (これをやらないと、店舗バランス用ループが順次埋めるうちに、本人の第1優先と異なる枠で消費される)
+    // ※ 同じ枠を希望する人が複数いる場合は、最初に見つかった人を優先(後の人は通常ループで処理)
+    const phase1Assigned = new Set(); // この日に Phase 1 で割当済みのスタッフID
+    const usedInPhase1 = { EARLY: false, MIDDLE: false, LATE: false };
+    for (const c of [...candidates]) {
+      if (assigned >= needsToAssign) break;
+      if (c.type === STAFF_TYPE.MAMA) continue; // ママさんは別ロジック
+      const priority = getShiftPriority(c.id, i, c.type);
+      if (!priority) continue; // 通常日はPhase 2へ
+      const top = priority[0]; // 第1優先 (EARLY/MIDDLE/LATE のいずれか)
+      // 既にその枠が他のスタッフ(Phase 1 or 既存固定)で使われていたらスキップ
+      if (usedInPhase1[top]) continue;
+      // 店舗が既にその枠を持っているか確認 (assignedShiftsで確認)
+      const alreadyHasInStore = (
+        (top === 'EARLY' && (hasEarly || usedInPhase1.EARLY)) ||
+        (top === 'MIDDLE' && (hasMiddle || usedInPhase1.MIDDLE)) ||
+        (top === 'LATE' && (hasLate || usedInPhase1.LATE))
+      );
+      if (alreadyHasInStore) continue;
+      // この人をその枠で確定
+      result[c.id][ds] = top;
+      phase1Assigned.add(c.id);
+      usedInPhase1[top] = true;
+      const cIdx = candidates.findIndex(cc => cc.id === c.id);
+      if (cIdx >= 0) candidates.splice(cIdx, 1);
+      assigned++;
+    }
+
+    // Phase 1 で店舗バランスが変わった可能性があるので、再評価
+    const phase1HasEarly = hasEarly || usedInPhase1.EARLY;
+    const phase1HasMiddle = hasMiddle || usedInPhase1.MIDDLE;
+    const phase1HasLate = hasLate || usedInPhase1.LATE;
+    // 残りの shiftPriority を再構築 (Phase 1 で埋まった枠は除外)
+    const remainingShiftPriority = [];
+    if (!phase1HasEarly) remainingShiftPriority.push('EARLY');
+    if (!phase1HasLate) remainingShiftPriority.push('LATE');
+    if (!phase1HasMiddle) remainingShiftPriority.push('MIDDLE');
+    while (remainingShiftPriority.length < needsToAssign - assigned) {
+      remainingShiftPriority.push(['EARLY','MIDDLE','LATE'][remainingShiftPriority.length % 3]);
+    }
+
+    // ============== Phase 2: 残り枠を通常ロジックで埋める ==============
+    for (const shiftType of remainingShiftPriority) {
       if (assigned >= needsToAssign) break;
       // 動的に現在のママさん割当数をチェック（このループ内で割り当てた分も含む）
       const liveMamaCount = staff.filter(st =>
